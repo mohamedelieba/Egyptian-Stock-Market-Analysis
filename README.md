@@ -25,7 +25,7 @@ The extracted data is stored in lists, and only companies with a P/B value less 
 * matplotlib
 * seaborn
 ### Usage
-To use the script, simply run it from the command line or within a Python IDE. You can modify the list of stock symbols to suit your needs.
+To use the script, simply run it on as a Jupyter notebook on your browser.
 
 ### Contributing
 Contributions to this script are welcome. If you find any issues or have suggestions for improvements, feel free to open a GitHub issue or submit a pull request.
