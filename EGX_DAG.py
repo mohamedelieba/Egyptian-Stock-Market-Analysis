@@ -3,6 +3,7 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.contrib.sensors.file_sensor import FileSensor
 from airflow.operators.dummy import DummyOperator
+from airflow.decorators import task, dag
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup, SoupStrainer
@@ -18,14 +19,15 @@ import json
 
 SYMBOLS_PATH = '/home/elieba/airflow/files/symbols.txt'
 
-def fetch_symbols():
+@task
+def fetch():
         resp = requests.get('https://www.tradingview.com/markets/stocks-egypt/market-movers-large-cap/')
         soup = BeautifulSoup(resp.text)
         symbols = []
-        with open(SYMBOLS_PATH, 'w') as file:
-            for i, tag in enumerate(soup.findAll('a', attrs={'class': re.compile('^apply-common-tooltip')})): 
-                if(i%2==0 and tag.string != 'EGS923M1C017'):
-                    file.write(tag.string + '\n')
+        for i, tag in enumerate(soup.findAll('a', attrs={'class': re.compile('^apply-common-tooltip')})): 
+            if(i%2==0 and tag.string != 'EGS923M1C017'):
+                 symbols.append(tag.string)
+        return symbols
 
 
 
@@ -50,10 +52,8 @@ EPS = []
 prices = []
 book_values =[]
 
-def parse(**kwargs):
-    with open(SYMBOLS_PATH, 'r') as file:
-        lines = file.readlines()
-        symbols = [line.strip() for line in lines]
+@task
+def parse(symbols: list):
 
         for symbol in symbols:
             resp = requests.get(base_url+symbol)
@@ -103,19 +103,13 @@ def parse(**kwargs):
         df = df.sort_values(by=['Diff_PCT %', 'year','Quarter'], ascending=False)
         df = df[['Company', 'Symbol', 'P/B','Price','Book Value','Date of Book Value Update', 'Diff_PCT %']]
         df = df.reset_index(drop=True)
-        ti = kwargs['ti']
-        compnies_dict = df.to_dict(orient='records')
-        companies_json = json.dumps(compnies_dict)
-        ti.xcom_push(key='companies_json', value = companies_json)
 
+        return df.to_json()
 
-def draw(**kwargs):
+@task
+def draw(companies_json: str):
 
-        ti = kwargs['ti']
-        companies_json = ti.xcom_pull(task_ids='parse', key='companies_json')
-        compnaies_dict = json.loads(companies_json)
-        df = pd.DataFrame(compnaies_dict)
-
+        df = pd.read_json(companies_json)
         fig, ax = plt.subplots(figsize=(10,6))
 
         x = np.arange(len(df))
@@ -138,8 +132,6 @@ def draw(**kwargs):
             
         plt.savefig('/home/elieba/airflow/files/companies_chart.png', dpi=300)
 
-
-
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -150,37 +142,14 @@ default_args = {
     'retry_delay': timedelta(minutes=5),  
 }
 
-with DAG(
-    'EGX_DAG',  
-    default_args=default_args,
-    description='EGX Analysis Pipeline',
-    schedule=timedelta(days=1),  
-    catchup=False,  
-) as dag:
-    
-    start_task  = DummyOperator(  task_id= "start" )
-    stop_task   = DummyOperator(  task_id= "stop"  )
-    
-    fetch_task = PythonOperator(
-        task_id='fetch_symbols',  
-        python_callable=fetch_symbols,  
-    )
+@dag(dag_id='EGX_DAG',
+     default_args=default_args,
+     description='EGX Analysis Pipeline',
+     schedule=timedelta(days=1),
+     catchup=False)
+def taskflow_api_dag():
+    symbols = fetch()
+    companies_json = parse(symbols)
+    draw(companies_json)
 
-    sensor_task = FileSensor( task_id= "my_file_sensor_task",
-    poke_interval= 10,  
-    timeout = 10 * 60,  
-    filepath= SYMBOLS_PATH) 
-
-
-    parse = PythonOperator(
-        task_id = 'parse',
-        python_callable=parse
-    )
-
-    draw = PythonOperator(
-        task_id = 'draw',
-        python_callable = draw
-    )
-
-    
-    start_task >> fetch_task >> sensor_task >> parse >> draw >> stop_task 
+dag = taskflow_api_dag()
