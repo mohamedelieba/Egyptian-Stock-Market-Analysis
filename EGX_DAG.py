@@ -2,6 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.contrib.sensors.file_sensor import FileSensor
+from airflow.operators.dummy import DummyOperator
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup, SoupStrainer
@@ -16,30 +17,8 @@ import json
 
 
 SYMBOLS_PATH = '/home/elieba/airflow/files/symbols.txt'
-# Define default arguments that are passed to each task
-default_args = {
-    'owner': 'airflow',
-    'depends_on_past': False,
-    'start_date': datetime(2024, 10, 9),  # Start date of the DAG
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 0,
-    'retry_delay': timedelta(minutes=5),  # Time between retries
-}
 
-# Define the DAG, passing in the DAG name, default arguments, and schedule interval
-with DAG(
-    'EGX_DAG',  # Name of the DAG
-    default_args=default_args,
-    description='EGX Analysis Pipeline',
-    schedule=timedelta(days=1),  # Run the DAG every day
-    catchup=False,  # Skip backfilling for the DAG
-) as dag:
-
-    # Define tasks using operators
-
-    # Task 1: Fetch All EGX Listed Companies
-    def fetch_symbols():
+def fetch_symbols():
         resp = requests.get('https://www.tradingview.com/markets/stocks-egypt/market-movers-large-cap/')
         soup = BeautifulSoup(resp.text)
         symbols = []
@@ -48,42 +27,32 @@ with DAG(
                 if(i%2==0 and tag.string != 'EGS923M1C017'):
                     file.write(tag.string + '\n')
 
-    fetch_task = PythonOperator(
-        task_id='fetch_symbols',  # Unique ID for the task
-        python_callable=fetch_symbols,  # Python function to execute
-    )
 
-    # Task 2: Wait for the symbols file to be written
-    sensor_task = FileSensor( task_id= "my_file_sensor_task",
-    poke_interval= 10,  
-    timeout = 10 * 60,  
-    filepath= SYMBOLS_PATH) 
 
-    
-    def has_book_value(tag):
+def has_book_value(tag):
         return tag.string and re.compile("^Book Value").search(tag.string.get_text())
 
-    def has_market_cap(tag):
+def has_market_cap(tag):
         return tag.string and re.compile("Market Cap").search(tag.string.get_text())
 
-    def has_total_shares(tag):
+def has_total_shares(tag):
         return tag.string and re.compile("Current Total Shares").search(tag.string.get_text())
-    def has_eps(tag):
+def has_eps(tag):
         return tag.string and re.compile("EPS").search(tag.string.get_text())
     
-    base_url = 'https://english.mubasher.info/markets/EGX/stocks/'
+base_url = 'https://english.mubasher.info/markets/EGX/stocks/'
     
-    symbols_list = []
-    update_dates = []
-    ratios = []
-    names = []
-    EPS = []
-    prices = []
-    book_values =[]
+symbols_list = []
+update_dates = []
+ratios = []
+names = []
+EPS = []
+prices = []
+book_values =[]
 
-    def parse(**kwargs):
-        with open(SYMBOLS_PATH, 'r') as file:
-            lines = file.readlines()
+def parse(**kwargs):
+    with open(SYMBOLS_PATH, 'r') as file:
+        lines = file.readlines()
         symbols = [line.strip() for line in lines]
 
         for symbol in symbols:
@@ -139,15 +108,11 @@ with DAG(
         companies_json = json.dumps(compnies_dict)
         ti.xcom_push(key='companies_json', value = companies_json)
 
-    parse_compnies = PythonOperator(
-        task_id = 'parse_companies',
-        python_callable=parse
-    )
 
-    def draw(**kwargs):
+def draw(**kwargs):
 
         ti = kwargs['ti']
-        companies_json = ti.xcom_pull(task_ids='parse_companies', key='companies_json')
+        companies_json = ti.xcom_pull(task_ids='parse', key='companies_json')
         compnaies_dict = json.loads(companies_json)
         df = pd.DataFrame(compnaies_dict)
 
@@ -172,12 +137,50 @@ with DAG(
         ax.yaxis.set_major_formatter(formatter)
             
         plt.savefig('/home/elieba/airflow/files/companies_chart.png', dpi=300)
-    
 
-    draw_task = PythonOperator(
-        task_id = 'draw_task',
+
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 10, 9), 
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 0,
+    'retry_delay': timedelta(minutes=5),  
+}
+
+with DAG(
+    'EGX_DAG',  
+    default_args=default_args,
+    description='EGX Analysis Pipeline',
+    schedule=timedelta(days=1),  
+    catchup=False,  
+) as dag:
+    
+    start_task  = DummyOperator(  task_id= "start" )
+    stop_task   = DummyOperator(  task_id= "stop"  )
+    
+    fetch_task = PythonOperator(
+        task_id='fetch_symbols',  
+        python_callable=fetch_symbols,  
+    )
+
+    sensor_task = FileSensor( task_id= "my_file_sensor_task",
+    poke_interval= 10,  
+    timeout = 10 * 60,  
+    filepath= SYMBOLS_PATH) 
+
+
+    parse = PythonOperator(
+        task_id = 'parse',
+        python_callable=parse
+    )
+
+    draw = PythonOperator(
+        task_id = 'draw',
         python_callable = draw
     )
 
-    # Set task dependencies (task1 runs before task2)
-    fetch_task >> sensor_task >> parse_compnies >> draw_task  # task1 must run successfully before task2 starts
+    
+    start_task >> fetch_task >> sensor_task >> parse >> draw >> stop_task 
